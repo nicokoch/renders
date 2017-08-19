@@ -1,0 +1,10 @@
+[package]
+name = "renders"
+version = "0.1.0"
+authors = ["Nicolas Koch <nioko1337@gmail.com>"]
+
+[dependencies]
+vulkano = "0.6"
+vulkano-win = "0.6"
+vulkano-shader-derive = "0.6"
+winit = "0.7.5"
