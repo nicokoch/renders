@@ -61,7 +61,6 @@ use vulkano::swapchain::SwapchainCreationError;
 use vulkano::sync::now;
 use vulkano::sync::GpuFuture;
 
-use std::iter;
 use std::sync::Arc;
 use std::mem;
 
@@ -191,6 +190,7 @@ fn main() {
         let alpha = caps.supported_composite_alpha.iter().next().unwrap();
         // Choosing the internal format that the images will have.
         let format = caps.supported_formats[0].0;
+        println!("{:?}", format);
         println!("Before create sc");
         // Please take a look at the docs for the meaning of the parameters we didn't mention.
         let swapchain = Swapchain::new(device.clone(), window.surface().clone(), caps.min_image_count, format,
@@ -207,18 +207,18 @@ fn main() {
         struct Vertex { position: [f32; 2] }
         impl_vertex!(Vertex, position);
 
-        CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(), [
-            Vertex { position: [-1.0, 1.0] },
+        CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::vertex_buffer(), [
             Vertex { position: [-1.0, -1.0] },
             Vertex { position: [1.0, -1.0] },
-            Vertex { position: [1.0, -1.0] },
+            Vertex { position: [1.0, 1.0] },
+            Vertex { position: [-1.0, -1.0] },
             Vertex { position: [1.0, 1.0] },
             Vertex { position: [-1.0, 1.0] },
         ].iter().cloned()).expect("failed to create buffer")
     };
 
     let image = StorageImage::new(device.clone(), Dimensions::Dim1d { width: 1 },
-                                  Format::R32Sfloat, Some(queue.family())).unwrap();
+                                  Format::R32Uint, Some(queue.family())).unwrap();
 
     // The next step is to create the shaders.
     //
@@ -247,11 +247,20 @@ void main() {
 #version 450
 
 layout(set = 0, binding = 0, r32ui) uniform volatile uimage1D img;
+
+layout(push_constant) uniform PushConsts {
+	uint fragment_count;
+} push_consts;
+
 layout(location = 0) out vec4 f_color;
 
 void main() {
-    float val = imageAtomicAdd(img, 0, 1);
-    f_color = vec4(val, val, val, 1.0);
+    uint current_fragment_no = imageAtomicAdd(img, 0, 1);
+    // convert to float between 0.0 and 1.0 in order to represent a color
+    float color_component = float(current_fragment_no) / float(push_consts.fragment_count);
+    // manual gamma correction
+    color_component = pow(color_component, 2.2);
+    f_color = vec4(color_component, color_component, color_component, 1.0);
 }
 "]
         struct Dummy;
@@ -332,8 +341,9 @@ void main() {
     // Since we need to draw to multiple images, we are going to create a different framebuffer for
     // each image.
     let mut framebuffers: Option<Vec<Arc<vulkano::framebuffer::Framebuffer<_,_>>>> = None;
-    let buf = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(),
-                                             (0 .. 1).map(|_| 0f32))
+
+    let out_buf = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(),
+                                             (0 .. 1).map(|_| 0u32))
                                             .expect("failed to create buffer");
 
     // Initialization is finally finished!
@@ -427,7 +437,11 @@ void main() {
         //
         // Note that we have to pass a queue family when we create the command buffer. The command
         // buffer will only be executable on that given queue family.
+        let (width, height) = window.window().get_inner_size_pixels().unwrap();
+        let fragment_count = width * height;
         let command_buffer = AutoCommandBufferBuilder::primary_one_time_submit(device.clone(), queue.family()).unwrap()
+            //.copy_buffer_to_image(in_buf.clone(), image.clone()).unwrap()
+            .clear_color_image(image.clone(), ClearValue::Uint([0, 0, 0, 0])).unwrap()
             // Before we can draw, we have to *enter a render pass*. There are two methods to do
             // this: `draw_inline` and `draw_secondary`. The latter is a bit more advanced and is
             // not covered here.
@@ -454,7 +468,7 @@ void main() {
                       }]),
                       scissors: None,
                   },
-                  vertex_buffer.clone(), set.clone(), ())
+                  vertex_buffer.clone(), set.clone(), fragment_count)
             .unwrap()
 
             // We leave the render pass by calling `draw_end`. Note that if we had multiple
@@ -462,9 +476,9 @@ void main() {
             // next subpass.
             //.clear_color_image(image.clone(), ClearValue::Stencil(0))
             //.unwrap()
-            .copy_image_to_buffer(image.clone(), buf.clone()).unwrap()
             .end_render_pass()
             .unwrap()
+            .copy_image_to_buffer(image.clone(), out_buf.clone()).unwrap()
             // Finish building the command buffer by calling `build`.
             .build().unwrap();
 
@@ -479,8 +493,11 @@ void main() {
             // the GPU has finished executing the command buffer that draws the triangle.
             .then_swapchain_present(queue.clone(), swapchain.clone(), image_num)
             .then_signal_fence_and_flush().unwrap();
+        future.wait(None).unwrap();
         previous_frame_end = Box::new(future) as Box<_>;
 
+        //println!("{:?}", &in_buf.read().unwrap()[..]);
+        println!("{:?} vs {}", &out_buf.read().unwrap()[..], fragment_count);
         // Note that in more complex programs it is likely that one of `acquire_next_image`,
         // `command_buffer::submit`, or `present` will block for some time. This happens when the
         // GPU's queue is full and the driver has to wait until the GPU finished some work.
